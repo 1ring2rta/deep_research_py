@@ -3,7 +3,7 @@ import datetime
 import os
 
 
-loggger = None
+logger = None
 
 
 def initial_logger(logging_path: str = "log", enable_stdout: bool = False) -> None:
@@ -12,7 +12,7 @@ def initial_logger(logging_path: str = "log", enable_stdout: bool = False) -> No
 
     now = datetime.datetime.now()
     log_file = os.path.join(
-        logging_path, f"deep_research_py_{now.strftime('%Y%m%d_%H%M%S')}.log"
+        logging_path, f"/mnt/data/hanchen/deep-research-py/logs/deep_research_py_{now.strftime('%Y%m%d_%H%M%S')}.log"
     )
     if not os.path.exists(logging_path):
         os.makedirs(logging_path)

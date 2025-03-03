@@ -39,16 +39,16 @@ def get_ai_client() -> openai.OpenAI:
     service = get_service()
     if service.lower() == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
-        endpoint = os.getenv("OPENAI_API_ENDPOINT", "https://api.openai.com/v1")
+        endpoint = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         if not api_key:
             console.print("[red]Missing OPENAI_API_KEY in environment[/red]")
             raise typer.Exit(1)
         client = create_openai_client(api_key=api_key, base_url=endpoint)
 
         return client
-    elif service.lower() == "deepseek":
+    elif service.lower() == "deepseek" or service.lower().startswith("ep-"):
         api_key = os.getenv("DEEPSEEK_API_KEY")
-        endpoint = os.getenv("DEEPSEEK_API_ENDPOINT", "https://api.deepseek.com/v1")
+        endpoint = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
         if not api_key:
             console.print("[red]Missing DEEPSEEK_API_KEY in environment[/red]")
             raise typer.Exit(1)
@@ -118,7 +118,7 @@ def trim_prompt(
     return trim_prompt(trimmed_prompt, context_size)
 
 
-async def generate_completions(client, model, messages, format):
+async def generate_completions(client, model, messages, format=None):
     if get_service() == "ollama":
         response = await asyncio.get_event_loop().run_in_executor(
             None,

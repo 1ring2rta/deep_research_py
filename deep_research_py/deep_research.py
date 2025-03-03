@@ -13,7 +13,10 @@ from .common.token_cunsumption import (
 from .utils import get_service
 import json
 from pydantic import BaseModel
-
+import requests
+import httpx
+from datetime import datetime
+import re
 
 class SearchResponse(TypedDict):
     data: List[Dict[str, str]]
@@ -29,6 +32,74 @@ class SerpQuery(BaseModel):
     research_goal: str
 
 
+def bing_search(query):
+    url = 'https://tgenerator.aicubes.cn/iwc-index-search-engine/search_engine/v1/search'
+    
+    params = {
+        'query': query,
+        # 'se': 'BAIDU',
+        'se': 'BING',
+        'limit': 5,
+        'user_id': 'test',
+        'app_id': 'test',
+        'trace_id': 'test',
+        'with_content': True
+    }
+
+    header = {
+        'X-Arsenal-Auth': 'arsenal-tools'
+    }
+    try:
+        response_dic = requests.post(url, data=params, headers=header)
+        # async with httpx.AsyncClient() as client:
+        #     response_dic = await client.post(url, data=params, headers=header)
+
+        if response_dic.status_code == 200:
+            response =  json.loads(response_dic.text)['data']
+
+            # 替换为serapi googlesearch的格式
+
+            organic_results_lst = []
+            for idx, t in enumerate(response):
+                position = idx +1
+                title = t['title'] if t['title'] else ""
+                link = t['url']
+                snippet = t['summary'] if t['summary'] else ""
+                date = t['publish_time'] if t['publish_time'] else ""
+                source = t['data_source'] if t['data_source'] else ""
+                content = t['content'] if t['content'] else ""
+
+
+                if date:
+                    dt_object = datetime.fromtimestamp(date)
+                    formatted_time = dt_object.strftime("%Y-%m-%d %H:%M:%S")
+                    date = formatted_time
+                    
+
+                organic_results_lst.append({
+                    "position": position,
+                    "title": title,
+                    "url": link,
+                    "snippet": snippet,
+                    "date": date,
+                    "source": source,
+                    "content": content
+                })
+            
+            # res = {
+            #     "search_parameters": response_dic.json()['header'],
+            #     "organic_results": organic_results_lst
+            # }
+
+            return organic_results_lst
+
+        else:
+            print(f"搜索失败，状态码：{response.status_code}")
+            return []
+    except Exception as e:
+        print(f"请求发生错误：{str(e)}")
+        return []  # 出现异常时也返回空列表
+
 class Firecrawl:
     """Simple wrapper for Firecrawl SDK."""
 
@@ -43,10 +114,11 @@ class Firecrawl:
             # Run the synchronous SDK call in a thread pool
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.app.search(
+                lambda: bing_search(
                     query=query,
                 ),
             )
+            # response = await bing_search(query)
 
             # Handle the response format from the SDK
             if isinstance(response, dict) and "data" in response:
@@ -102,10 +174,28 @@ async def generate_serp_queries(
     model: str,
     num_queries: int = 3,
     learnings: Optional[List[str]] = None,
+    original_query: str = None,  
 ) -> List[SerpQuery]:
-    """Generate SERP queries based on user input and previous learnings."""
+    """生成搜索查询时保持原始目标"""
+    
+    prompt = f"""\
+当前时间为{datetime.now().isoformat()}
+    
+- 原始研究目标：{original_query}
+- 当前阶段目标：{query}
+- 确保每个问题都服务于原始研究目标
 
-    prompt = f"""Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a JSON object with a 'queries' array field containing {num_queries} queries (or less if the original prompt is clear). Each query object should have 'query' and 'research_goal' fields. Make sure each query is unique and not similar to each other: <prompt>{query}</prompt>"""
+根据用户提供的研究主题，生成一组用于搜索的查询。返回一个包含 {num_queries} 个查询的 JSON 对象，对象中需包含一个 'queries' 数组字段。每个查询对象应包含 'query'（查询内容）和 'research_goal'（研究目标）字段。注意：
+1. 'query' 必须是一个简单的问题，能够通过搜索引擎直接回答。
+2. 确保每个查询都是唯一的，且与其他查询不相似。
+3. 所有查询必须服务于原始研究目标。
+
+示例：
+- 原始目标：量子计算的商业应用现状
+- 优秀问题：IBM量子计算机的最新商业合作案例
+- 劣质问题：量子力学的基本原理（偏离应用方向）
+
+用户提供的主题：<prompt>{query}</prompt>"""
 
     if learnings:
         prompt += f"\n\nHere are some learnings from previous research, use them to generate more specific queries: {' '.join(learnings)}"
@@ -117,7 +207,8 @@ async def generate_serp_queries(
             {"role": "system", "content": system_prompt()},
             {"role": "user", "content": prompt},
         ],
-        format=SerpQueryResponse.model_json_schema(),
+        # format=SerpQueryResponse.model_json_schema(),
+        format={"type": "json_object"},
     )
 
     try:
@@ -125,8 +216,15 @@ async def generate_serp_queries(
             result = SerpQueryResponse.model_validate_json(response.message.content)
             parse_ollama_token_consume("generate_serp_queries", response)
         else:
+            # json格式兜底
+            json_response = response.choices[0].message.content
+            try:
+                json.loads(json_response) # 为正常json
+            except:
+                json_response = re.findall(r"```(?:json)?\s*(.*?)\s*```", json_response, re.DOTALL)[0]
+
             result = SerpQueryResponse.model_validate_json(
-                response.choices[0].message.content
+                json_response
             )
             parse_openai_token_consume("generate_serp_queries", response)
 
@@ -145,7 +243,7 @@ async def generate_serp_queries(
 
 class SerpResultResponse(BaseModel):
     learnings: List[str]
-    followUpQuestions: List[str]
+    followup_questions: List[str]
 
 
 async def process_serp_result(
@@ -154,7 +252,8 @@ async def process_serp_result(
     client: openai.OpenAI,
     model: str,
     num_learnings: int = 3,
-    num_follow_up_questions: int = 3,
+    breadth: int = 3,
+    original_query: str = None,  
 ) -> Dict[str, List[str]]:
     """Process search results to extract learnings and follow-up questions."""
 
@@ -167,14 +266,30 @@ async def process_serp_result(
     # Create the contents string separately
     contents_str = "".join(f"<content>\n{content}\n</content>" for content in contents)
 
-    prompt = (
-        f"Given the following contents from a SERP search for the query <query>{query}</query>, "
-        f"generate a list of learnings from the contents. Return a JSON object with 'learnings' "
-        f"and 'followUpQuestions' keys with array of strings as values. Include up to {num_learnings} learnings and "
-        f"{num_follow_up_questions} follow-up questions. The learnings should be unique, "
-        "concise, and information-dense, including entities, metrics, numbers, and dates.\n\n"
-        f"<contents>{contents_str}</contents>"
-    )
+    prompt = f"""\
+当前时间为{datetime.now().isoformat()}
+
+当前研究目标：{query}
+原始研究目标：{original_query}
+
+请基于以下内容完成以下任务：
+1. 生成最多 {num_learnings} 条研究认知（learnings），要求：
+   - 认知内容必须与原始研究目标直接相关
+   - 仔细、严格检视内容与原始研究目标之间的因果关系，若无关你应当返回空的“learnings”和“followUpQuestions”
+   - 每条认知应简洁明了，包含具体信息（如数据、事实、案例等）
+   - 避免重复或冗余信息
+
+2. 生成最多 {breadth} 个后续研究问题（follow-up questions），要求：
+   - 问题必须直接服务于原始研究目标
+   - 问题应简洁明确，能够通过搜索引擎直接回答
+   - 避免生成与当前内容无关或偏离原始目标的问题
+
+3. 返回一个 JSON 对象，包含以下字段：
+   - "learnings"：认知列表（数组，每条认知为一个字符串）
+   - "followUpQuestions"：后续问题列表（数组，每个问题为一个字符串）
+
+内容：
+{contents_str}"""    
 
     response = await generate_completions(
         client=client,
@@ -183,7 +298,8 @@ async def process_serp_result(
             {"role": "system", "content": system_prompt()},
             {"role": "user", "content": prompt},
         ],
-        format=SerpResultResponse.model_json_schema(),
+        # format=SerpResultResponse.model_json_schema(),
+        format={"type": "json_object"},
     )
 
     try:
@@ -191,8 +307,15 @@ async def process_serp_result(
             result = SerpResultResponse.model_validate_json(response.message.content)
             parse_ollama_token_consume("process_serp_result", response)
         else:
+
+            json_response = response.choices[0].message.content
+            try:
+                json.loads(json_response)
+            except:
+                json_response =re.findall(r"```(?:json)?\s*(.*?)\s*```", json_response, re.DOTALL)[0]
+
             result = SerpResultResponse.model_validate_json(
-                response.choices[0].message.content
+                json_response
             )
             parse_openai_token_consume("process_serp_result", response)
 
@@ -200,7 +323,7 @@ async def process_serp_result(
             f"Processed SERP results for query: {query}, found {len(result.learnings)} learnings and {len(result.followUpQuestions)} follow-up questions"
         )
         log_event(
-            f"Got learnings: {len(result.learnings)} and follow-up questions: {len(result.followUpQuestions)}"
+            f"Got learnings: \n{result.learnings} \nand follow-up questions: \n{result.followUpQuestions}"
         )
         return {
             "learnings": result.learnings[:num_learnings],
@@ -218,13 +341,16 @@ async def process_serp_result(
 class FinalReportResponse(BaseModel):
     reportMarkdown: str
 
-
+import sys
+sys.path.append('../deep_research_py')
+from .gen_outline_acticle import *
 async def write_final_report(
     prompt: str,
     learnings: List[str],
     visited_urls: List[str],
     client: openai.OpenAI,
     model: str,
+    writing_method="serial"
 ) -> str:
     """Generate final report based on all research learnings."""
 
@@ -233,35 +359,35 @@ async def write_final_report(
         150_000,
     )
 
-    user_prompt = (
-        f"Given the following prompt from the user, write a final report on the topic using "
-        f"the learnings from research. Return a JSON object with a 'reportMarkdown' field "
-        f"containing a detailed markdown report (aim for 3+ pages). Include ALL the learnings "
-        f"from research:\n\n<prompt>{prompt}</prompt>\n\n"
-        f"Here are all the learnings from research:\n\n<learnings>\n{learnings_string}\n</learnings>"
+    # step1: 生成outline
+    draft_outlines = await write_outline(prompt, learnings_string, client, model)
+    print(
+        f"gen draft outlines: {draft_outlines}"
     )
+    log_event(f"gen draft outlines: {draft_outlines}")
 
-    response = await generate_completions(
-        client=client,
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt()},
-            {"role": "user", "content": user_prompt},
-        ],
-        format=FinalReportResponse.model_json_schema(),
+    # # step2: 润色outline
+    outlines = await write_outline_polish(prompt, learnings_string, client, model, draft_outlines)
+    print(
+        f"gen polish outlines: {outlines}"
     )
+    log_event(f"gen polish outlines: {outlines}")
+    
+    # # step3: 生成文章
+    report =  await generate_article(prompt, learnings_string, client, model, outlines, writing_method)
+    
 
     try:
-        if get_service() == "ollama":
-            result = FinalReportResponse.model_validate_json(response.message.content)
-            parse_ollama_token_consume("write_final_report", response)
-        else:
-            result = FinalReportResponse.model_validate_json(
-                response.choices[0].message.content
-            )
-            parse_openai_token_consume("write_final_report", response)
+        # if get_service() == "ollama":
+        #     result = FinalReportResponse.model_validate_json(response.message.content)
+        #     parse_ollama_token_consume("write_final_report", response)
+        # else:
+        #     result = FinalReportResponse.model_validate_json(
+        #         response.choices[0].message.content
+        #     )
+        #     parse_openai_token_consume("write_final_report", response)
 
-        report = result.reportMarkdown if result.reportMarkdown else ""
+        # report = result.reportMarkdown if result.reportMarkdown else ""
         log_event(
             f"Generated final report based on {len(learnings)} learnings from {len(visited_urls)} sources"
         )
@@ -272,11 +398,25 @@ async def write_final_report(
         return report + urls_section
     except json.JSONDecodeError as e:
         print(f"Error parsing JSON response: {e}")
-        print(f"Raw response: {response.choices[0].message.content}")
+        # print(f"Raw response: {response.choices[0].message.content}")
         log_error(
-            f"Failed to generate final report for research query, raw response: {response.choices[0].message.content}"
+            f"Failed to generate final report for research query, raw response:"
         )
         return "Error generating report"
+
+
+
+from typing import TypedDict, List, Dict, Optional
+from uuid import uuid4
+
+class ResearchNode(TypedDict):
+    id: str
+    query: str
+    research_goal: str
+    learnings: List[str]
+    childs: List['ResearchNode']
+    urls: List[str]
+    depth: int
 
 
 async def deep_research(
@@ -286,102 +426,104 @@ async def deep_research(
     concurrency: int,
     client: openai.OpenAI,
     model: str,
-    learnings: List[str] = None,
-    visited_urls: List[str] = None,
-) -> ResearchResult:
+    original_query: str = None,
+    current_depth: int = 0,
+    parent: Optional[ResearchNode] = None
+) -> ResearchNode:
     """
-    Main research function that recursively explores a topic.
-
-    Args:
-        query: Research query/topic
-        breadth: Number of parallel searches to perform
-        depth: How many levels deep to research
-        learnings: Previous learnings to build upon
-        visited_urls: Previously visited URLs
+    返回包含树状结构的ResearchNode
     """
-    learnings = learnings or []
-    visited_urls = visited_urls or []
+    current_node: ResearchNode = {
+        "id": str(uuid4()),
+        "query": query,
+        "research_goal": original_query,
+        "learnings": [],
+        "childs": [],
+        "urls": [],
+        "depth": current_depth
+    }
 
-    # Generate search queries
+    if parent:
+        parent["childs"].append(current_node)
+
+    # 生成搜索查询
     serp_queries = await generate_serp_queries(
         query=query,
+        original_query=original_query,
         client=client,
         model=model,
         num_queries=breadth,
-        learnings=learnings,
+        parent_learnings=parent["learnings"],
     )
 
-    # Create a semaphore to limit concurrent requests
-    semaphore = asyncio.Semaphore(concurrency)
+    async def process_query(serp_query: SerpQuery) -> ResearchNode:
+        try:
+            result = await firecrawl.search(serp_query.query)
+            new_urls = [item.get("url") for item in result["data"] if item.get("url")]
+            
+            # 处理搜索结果
+            processed = await process_serp_result(
+                query=serp_query.query,
+                original_query=original_query,
+                search_result=result,
+                client=client,
+                model=model,
+            )
 
-    async def process_query(serp_query: SerpQuery) -> ResearchResult:
-        async with semaphore:
-            try:
-                # Search for content
-                result = await firecrawl.search(
-                    serp_query.query, timeout=15000, limit=5
-                )
+            # 更新当前节点
+            current_node["learnings"].extend(processed["learnings"])
+            current_node["urls"].extend(new_urls)
+            
+            # 去重处理
+            current_node["learnings"] = list(set(current_node["learnings"]))
+            current_node["urls"] = list(set(current_node["urls"]))
 
-                # Collect new URLs
-                new_urls = [
-                    item.get("url") for item in result["data"] if item.get("url")
-                ]
-
-                # Calculate new breadth and depth for next iteration
-                new_breadth = max(1, breadth // 2)
-                new_depth = depth - 1
-
-                # Process the search results
-                new_learnings = await process_serp_result(
-                    query=serp_query.query,
-                    search_result=result,
-                    num_follow_up_questions=new_breadth,
+            # 递归处理后续问题
+            if depth > 1:
+                child_breadth = max(1, breadth // 2)
+                return await deep_research(
+                    query=serp_query.research_goal,
+                    breadth=child_breadth,
+                    depth=depth-1,
+                    concurrency=concurrency,
                     client=client,
                     model=model,
+                    original_query=original_query,
+                    current_depth=current_depth+1,
+                    parent=current_node
                 )
+            return current_node
+        except Exception as e:
+            print(f"Query processing failed: {str(e)}")
+            return current_node
 
-                all_learnings = learnings + new_learnings["learnings"]
-                all_urls = visited_urls + new_urls
+    # 并行处理所有查询
+    await asyncio.gather(*[process_query(q) for q in serp_queries])
+    return current_node
 
-                # If we have more depth to go, continue research
-                if new_depth > 0:
-                    print(
-                        f"Researching deeper, breadth: {new_breadth}, depth: {new_depth}"
-                    )
 
-                    next_query = f"""
-                    Previous research goal: {serp_query.research_goal}
-                    Follow-up research directions: {" ".join(new_learnings["followUpQuestions"])}
-                    """.strip()
-
-                    return await deep_research(
-                        query=next_query,
-                        breadth=new_breadth,
-                        depth=new_depth,
-                        concurrency=concurrency,
-                        learnings=all_learnings,
-                        visited_urls=all_urls,
-                        client=client,
-                        model=model,
-                    )
-
-                return {"learnings": all_learnings, "visited_urls": all_urls}
-
-            except Exception as e:
-                if "Timeout" in str(e):
-                    print(f"Timeout error running query: {serp_query.query}: {e}")
-                else:
-                    print(f"Error running query: {serp_query.query}: {e}")
-                return {"learnings": [], "visited_urls": []}
-
-    # Process all queries concurrently
-    results = await asyncio.gather(*[process_query(query) for query in serp_queries])
-
-    # Combine all results
-    all_learnings = list(
-        set(learning for result in results for learning in result["learnings"])
-    )
-
-    all_urls = list(set(url for result in results for url in result["visited_urls"]))
-
-    return {"learnings": all_learnings, "visited_urls": all_urls}
+def generate_tree_diagram(node: ResearchNode) -> str:
+    """生成带自动层级感知的树状图"""
+    def build_tree_lines(node: ResearchNode, prefix: str = "", is_last: bool = True) -> List[str]:
+        lines = []
+        
+        # 当前节点显示
+        depth_indicator = f"[D{node['depth']+1}]"  # 深度从0开始计数，显示时+1
+        connector = "└── " if is_last else "├── "
+        lines.append(f"{prefix}{connector}{depth_indicator} {node['query']}")
+        
+        # 学习要点缩进
+        learnings_prefix = prefix + ("    " if is_last else "│   ")
+        for i, learning in enumerate(node['learnings']):
+            symbol = "└• " if i == len(node['learnings'])-1 else "├• "
+            lines.append(f"{learnings_prefix}{symbol}{trim_prompt(learning, 50)}")
+        
+        # 子节点处理
+        child_prefix = prefix + ("    " if is_last else "│   ")
+        for i, child in enumerate(node['childs']):
+            is_last_child = i == len(node['childs'])-1
+            lines.extend(build_tree_lines(child, child_prefix, is_last_child))
+        
+        return lines
+    
+    return "\n".join(build_tree_lines(node))
