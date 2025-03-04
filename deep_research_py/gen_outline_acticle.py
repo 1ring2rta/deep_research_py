@@ -55,7 +55,8 @@ async def write_outline_polish(prompt, learnings_string, client, model, draft_ou
         polish the outline base on the collection information"
     """
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    user_prompt = f"""Improve an outline for a deep research report. You already have a draft outline that covers the general information. Now you want to improve it based on the collection information to make it more informative.
+    user_prompt = f"""\
+Improve an outline for a deep research report. You already have a draft outline that covers the general information. Now you want to improve it based on the collection information to make it more informative.
 Here is the format of your writing:
 1. Use "#" Title" to indicate section title, "-" writing point to indicate writing plan below the section title. And not including "##" Title", "###" Title" and so on. 
 2. Do not include other information.
@@ -156,6 +157,7 @@ Here is the format of your writing:
 2. Write the section with proper format (Start your writing with # section title. Don't include the page title or try to write other sections):
 3. Please generate 3-5 paragraphs. Each paragraph is at least 1000 words long.
 4. Please ensure that the data of the article is true and reliable, the logical structure is clear, the content is complete, and the style is professional, so as to attract readers to read.
+5. Cite information source (use r"\[\d+\]").
 
 The Collected information:
 {learnings_string}
@@ -188,7 +190,8 @@ async def generate_section_serial(prompt, learnings_string, model, client, outli
     """
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     second_subtitle_str = ";".join(second_subtitle)
-    user_prompt = f"""Write a deep research report section based on the collected information and the already written text.
+    user_prompt = f"""\
+Write a deep research report section based on the collected information and the already written text.
 
 Here is the format of your writing:
 1. Use "#" Title" to indicate section title, don't generate a "##" Title.
@@ -196,6 +199,7 @@ Here is the format of your writing:
 3. Please generate 3-5 paragraphs. Each paragraph is at least 1000 words long.
 4. Please ensure that the data of the article is true and reliable, the logical structure is clear, the content is complete, and the style is professional, so as to attract readers to read.
 5. Maintain narrative consistency with previously written sections while avoiding content duplication. Ensure smooth transitions between sections.
+6. Cite information source (use r"\[\d+\]").
 
 The Collected information:
 {learnings_string}
@@ -230,12 +234,13 @@ async def polish_article(prompt, outlines, article, model, client):
         polish the article
     """
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    user_prompt = f"""You won't delete any non-repeated part in the article. You will keep the inline citations and article structure (indicated by "#") appropriately. Do your job for the following article.
+    user_prompt = f"""\
+You won't delete any non-repeated part in the article. You will keep the inline citations and article structure (indicated by "#") appropriately. Do your job for the following article.
 
 Here is the format of your writing:
 1. Use "#" Title" to indicate section title, don't generate a "##" Title.
 2. Please ensure that the data of the article is true and reliable, the logical structure is clear, the content is complete, and the style is professional, so as to attract readers to read.
-
+3. Cite information source (use r"\[\d+\]").
 
 The topic you want to write:{prompt}
 

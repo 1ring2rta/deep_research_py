@@ -108,11 +108,23 @@ async def main(
     console.print()
     log_event(f"🔍 Research depth (recommended 1-5) [2]: {depth}")
 
+    ancestor: ResearchNode = {
+        "id": str(uuid4()),
+        "depth": depth,
+        "query": query,
+        "research_goal": query,
+        "learnings": [],
+        "childs": [],
+        "urls": [],
+    }
+
     concept_prompt = f"""请分析以下研究问题中的核心实体和概念，生成用于获取基础定义的搜索查询。
 要求：
 1. 识别问题中的关键实体（人物、组织、专业术语等）
 2. 为每个实体生成1个定义查询（示例："XXX 的定义是什么"）
 3. 用中文直接输出查询，每行一个
+4. 一些简单的概念，不需要查询
+5. 若无需查询，则返回 "False"
 
 研究问题：{query}
 
@@ -121,20 +133,20 @@ async def main(
     concept_response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": concept_prompt}],
-        max_tokens=512
     )
-    concept_queries = [q.strip() for q in concept_response.choices[0].message.content.split("\n") if q.strip()]
+    concept_queries = [q.strip() for q in concept_response.choices[0].message.content.split("\n") if q.strip() and "False" not in q]
 
     semaphore = asyncio.Semaphore(concurrency)
     async def process_concept(query_str: str):
         async with semaphore:
             try:
-                result = await firecrawl.search(query_str, timeout=15000, limit=3)
+                result = await firecrawl.search(query_str, timeout=15000, limit=1)
                 new_urls = [item.get("url") for item in result["data"] if item.get("url")]
                 processed = await process_serp_result(
                     query=query_str,
+                    research_tree="",
                     search_result=result,
-                    num_follow_up_questions=0,
+                    num_followup_questions=0,
                     client=client,
                     model=model,
                 )
@@ -145,32 +157,48 @@ async def main(
             except Exception as e:
                 print(f"search failed: {query_str} - {str(e)}")
                 return {"learnings": [], "visited_urls": []}
+            
+    if concept_queries:
+        concept_results = await asyncio.gather(*[process_concept(q) for q in concept_queries[:1]])
+    
+        learnings = []
+        visited_urls = []
+        for res in concept_results:
+            print(res["learnings"])
+            learnings.extend(res["learnings"])
+            visited_urls.extend(res["visited_urls"])
+        
+        learnings = list(set(learnings))
+        visited_urls = list(set(visited_urls))
 
-    concept_results = await asyncio.gather(*[process_concept(q) for q in concept_queries[:3]])
-    
-    learnings = []
-    visited_urls = []
-    for res in concept_results:
-        print(res["learnings"])
-        learnings.extend(res["learnings"])
-        visited_urls.extend(res["visited_urls"])
-    
-    learnings = list(set(learnings))
-    visited_urls = list(set(visited_urls))
+        ancestor['childs'].append(
+            ResearchNode(
+                {
+                    "id": str(uuid4()),
+                    "depth": depth,
+                    "query": "",
+                    "research_goal": "基础概念理解",
+                    "learnings": learnings,
+                    "childs": [],
+                    "urls": visited_urls,
+                }
+            )
+        )
 
     # First show progress for research plan
     console.print("\n[yellow]Creating research plan...[/yellow]")
     log_event("\n[yellow]Creating research plan...[/yellow]")
-    follow_up_questions = await generate_feedback(
-        query, concept_results, client, model, max_followup_questions
-    )
+    followup_questions = list()
+    # await generate_feedback(
+    #     query, concept_results, client, model, max_followup_questions
+    # )
 
-    if len(follow_up_questions) != 0:
+    if len(followup_questions) != 0:
         # Then collect answers separately from progress display
         console.print("\n[bold yellow]Follow-up Questions:[/bold yellow]")
         log_event("\n[bold yellow]Follow-up Questions:[/bold yellow]")
         answers = []
-        for i, question in enumerate(follow_up_questions, 1):
+        for i, question in enumerate(followup_questions, 1):
             console.print(f"\n[bold blue]Q{i}:[/bold blue] {question}")
             log_event(f"\n[bold blue]Q{i}:[/bold blue] {question}")
             answer = await async_prompt("➤ Your answer: ")
@@ -184,11 +212,11 @@ async def main(
         answers = []
 
     # Combine information
-    combined_query = f"""
-    Main Topic: {query}
-    Related Questions and Answers (may help):
-    {chr(10).join(f"Q: {q} A: {a}" for q, a in zip(follow_up_questions, answers))}
-    """
+    # combined_query = f"""
+    # Main Topic: {query}
+    # Related Questions and Answers (may help):
+    # {chr(10).join(f"Q: {q} A: {a}" for q, a in zip(followup_questions, answers))}
+    # """
 
     # Now use Progress for the research phase
     with Progress(
@@ -200,37 +228,40 @@ async def main(
         task = progress.add_task(
             "[yellow]Researching your topic...[/yellow]", total=None
         )
-        research_results = await deep_research(
-            query=combined_query,
+
+        result = await deep_research(
             breadth=breadth,
             depth=depth,
-            concurrency=concurrency,
-            client=client,
+            original_query=query, 
             model=model,
-
-            learnings=learnings,
-            visited_urls=visited_urls,
+            client=client,
+            concurrency=concurrency,
+            parent=ancestor,
+            ancestor=ancestor
         )
         progress.remove_task(task)
 
+        log_event(generate_tree_diagram(ancestor))
         # Show learnings
-        console.print("\n[yellow]Learnings:[/yellow]")
-        log_event("\n[yellow]Learnings:[/yellow]")
-        for learning in research_results["learnings"]:
-            rprint(f"• {learning}")
-            log_event(f"• {learning}")
+        # console.print("\n[yellow]Learnings:[/yellow]")
+        # log_event("\n[yellow]Learnings:[/yellow]")
+        # for learning in research_results["learnings"]:
+        #     rprint(f"• {learning}")
+        #     log_event(f"• {learning}")
 
 
         # Generate report
         task = progress.add_task("Writing final report...", total=None)
         report = await write_final_report(
-            prompt=combined_query,
-            learnings=research_results["learnings"],
-            visited_urls=research_results["visited_urls"],
+            prompt=query,
+            learnings=generate_tree_diagram(ancestor),
             client=client,
             model=model,
         )
         progress.remove_task(task)
+
+        citation_list = '\n'.join(generate_citation_list(ancestor))
+        report += f"\n\n【参考资料】\n\n{citation_list}"
 
         # Show results
         console.print("\n[bold green]Research Complete![/bold green]")
@@ -241,9 +272,9 @@ async def main(
 
 
         # Show sources
-        console.print("\n[yellow]Sources:[/yellow]")
-        for url in research_results["visited_urls"]:
-            rprint(f"• {url}")
+        # console.print("\n[yellow]Sources:[/yellow]")
+        # for url in research_results["visited_urls"]:
+        #     rprint(f"• {url}")
 
         end_time = datetime.now()
         print(f"Total time: {end_time - start_time}")
